@@ -1,0 +1,51 @@
+{
+  "name": "WinList — งานและเงินของวันนี้",
+  "short_name": "WinList",
+  "description": "สมุดงานและเงินประจำวันของไทย: จดงาน ใส่เงินที่เกี่ยวข้อง และลงบัญชีอัตโนมัติเมื่อทำเสร็จ",
+  "lang": "th",
+  "dir": "ltr",
+  "id": "./",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#e5ebe1",
+  "theme_color": "#e5ebe1",
+  "categories": ["productivity", "finance"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "เขียนรายการ",
+      "short_name": "เพิ่มงาน",
+      "description": "เปิด WinList พร้อมหน้าต่างเขียนรายการ",
+      "url": "./index.html?new=1",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="WinList">
+  <rect width="64" height="64" rx="12" fill="#14221a"/>
+  <rect x="5.5" y="5.5" width="53" height="53" rx="8" fill="none" stroke="#48604f" stroke-width="1.5"/>
+  <path d="M14 20.5 21.2 44l10.6-17.4L42.4 44 50 20.5" fill="none" stroke="#f3f7ef" stroke-width="5.4" stroke-linecap="square" stroke-linejoin="miter"/>
+  <g transform="translate(47 47) rotate(-8)">
+    <rect x="-11" y="-6" width="22" height="12" rx="1.5" fill="none" stroke="#f27e66" stroke-width="2.2"/>
+    <path d="m-5 0 3.4 3.2L5.4-3.4" fill="none" stroke="#f27e66" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

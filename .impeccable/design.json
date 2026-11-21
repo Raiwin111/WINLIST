@@ -1,0 +1,59 @@
+{
+  "seed": "b19749c8e9d9f7e0",
+  "direction": "5th-of-7-grounded",
+  "name": "WinList",
+  "mode": "operate",
+  "platform": "web",
+  "colour": {
+    "ground": "#e4e8e4",
+    "ink": "#2a2a20",
+    "expense": "#e53935",
+    "income": "#2e7d32",
+    "amber": "#fbc02d",
+    "vermilion": "#e53935"
+  },
+  "typography": {
+    "display": "Bai Jamjuree",
+    "body": "Anuphan",
+    "numerals": "tabular",
+    "scale": ["1rem", "1.25rem", "1.5rem", "2rem"]
+  },
+  "spacing": {
+    "tight": "0.5rem",
+    "compact": "1rem",
+    "generous": "1.5rem",
+    "aboveHeading": "1.5rem",
+    "belowHeading": "1rem"
+  },
+  "components": {
+    "checkCell": {
+      "stampRotation": "15deg",
+      "stampColour": "#e53935",
+      "unstamped": "check-outline",
+      "stamped": "win-rotated"
+    },
+    "moneyColumn": {
+      "format": "signed",
+      "negativePrefix": "−",
+      "positivePrefix": "+",
+      "decimal": 2
+    }
+  },
+  "states": {
+    "light": {
+      "ground": "#e4e8e4",
+      "ink": "#2a2a20",
+      "background": "#e4e8e4"
+    },
+    "dark": {
+      "ground": "#1e3a24",
+      "ink": "#c8e6c9",
+      "background": "#1e3a24"
+    }
+  },
+  "settings": {
+    "theme": ["system", "light", "dark"],
+    "ledgerVerified": false,
+    "queueAttempts": 5
+  }
+}
