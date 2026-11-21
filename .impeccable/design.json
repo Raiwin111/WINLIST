@@ -4,6 +4,12 @@
   "name": "WinList",
   "mode": "operate",
   "platform": "web",
+  "database": "supabase",
+  "supabase": {
+    "projectUrl": "https://your-project.supabase.com",
+    "anonKey": "your-anon-public-key",
+    "serviceRoleKey": "your-service-role-key"
+  },
   "colour": {
     "ground": "#e4e8e4",
     "ink": "#2a2a20",
@@ -54,6 +60,7 @@
   "settings": {
     "theme": ["system", "light", "dark"],
     "ledgerVerified": false,
-    "queueAttempts": 5
+    "queueAttempts": 5,
+    "supabaseEnabled": false
   }
 }
