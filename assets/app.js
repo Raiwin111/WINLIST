@@ -4,7 +4,7 @@
   const STORAGE_KEY = "winlist.v1";
   const LEDGER_TX_KEY = "transactions";
   const LEDGER_BALANCE_KEY = "currentBalance";
-  const APP_VERSION = "1.0.0";
+  const APP_VERSION = "1.1.0";
   const DEFAULT_LEDGER_URL =
     "../WebMangageMent Monney/Web ManageMent Money But have calendar/index.html";
 
@@ -97,6 +97,15 @@
     deferredPrompt: null,
     confirmResolve: null,
     loadError: "",
+    supabase: null,
+    remoteStatus: "off",
+    remoteError: "",
+    remoteTimer: null,
+    remoteSyncing: false,
+    remoteAgain: false,
+    remoteApplyTimer: null,
+    lastSyncedIds: new Set(),
+    channel: null,
   };
 
   let state;
@@ -352,7 +361,7 @@
     };
   }
 
-  function loadState() {
+  function loadLocalState() {
     let raw = null;
     try {
       raw = localStorage.getItem(STORAGE_KEY);
@@ -376,18 +385,388 @@
     }
   }
 
-  function saveState() {
+  function writeLocalState() {
     try {
       state.meta = state.meta || {};
       state.meta.lastOpenedAt = new Date().toISOString();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       return true;
     } catch (error) {
-      showToast("บันทึกไม่ได้: พื้นที่เก็บข้อมูลเต็มหรือถูกบล็อก", {
+      return false;
+    }
+  }
+
+  function saveState() {
+    const saved = writeLocalState();
+    if (app.supabase) scheduleRemoteSync();
+    if (!saved) {
+      showToast("บันทึกในเครื่องไม่ได้: พื้นที่เต็มหรือถูกบล็อก", {
         type: "error",
         duration: 6000,
       });
+    }
+    return saved;
+  }
+
+  /* ---------- Supabase cloud sync ---------- */
+
+  function readSupabaseConfig() {
+    const urlNode = document.getElementById("supabase-url");
+    const keyNode = document.getElementById("supabase-anon-key");
+    if (!urlNode || !keyNode) return { url: "", key: "" };
+    const url = String(urlNode.getAttribute("content") || "").trim();
+    const key = String(keyNode.getAttribute("content") || "").trim();
+    const invalid = function (value) {
+      return !value || /^your-|^https:\/\/your-project|^eyJ\.\.\.$/i.test(value);
+    };
+    return {
+      url: invalid(url) ? "" : url,
+      key: invalid(key) ? "" : key,
+    };
+  }
+
+  function loadSupabaseSdk() {
+    return new Promise(function (resolve) {
+      if (window.supabase && typeof window.supabase.createClient === "function") {
+        resolve(true);
+        return;
+      }
+      const script = document.createElement("script");
+      let settled = false;
+      const finish = function (ok) {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      script.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
+      script.async = true;
+      script.onload = function () {
+        finish(Boolean(window.supabase));
+      };
+      script.onerror = function () {
+        finish(false);
+      };
+      document.head.appendChild(script);
+      window.setTimeout(function () {
+        finish(Boolean(window.supabase));
+      }, 9000);
+    });
+  }
+
+  async function initSupabase() {
+    const config = readSupabaseConfig();
+    if (!config.url || !config.key) {
+      app.remoteStatus = "off";
       return false;
+    }
+    const ok = await loadSupabaseSdk();
+    if (!ok) {
+      app.remoteStatus = "error";
+      app.remoteError = "โหลดตัวเชื่อม Supabase ไม่ได้";
+      return false;
+    }
+    try {
+      app.supabase = window.supabase.createClient(config.url, config.key, {
+        auth: { persistSession: false },
+      });
+      app.remoteStatus = "loading";
+      return true;
+    } catch (error) {
+      app.remoteStatus = "error";
+      app.remoteError = "ตั้งค่า Supabase ไม่ถูกต้อง";
+      return false;
+    }
+  }
+
+  function taskToRow(task) {
+    return {
+      id: task.id,
+      title: task.title,
+      notes: task.notes || null,
+      due_date: task.dueDate || null,
+      due_time: task.dueTime || null,
+      money_type: task.money ? task.money.type : "none",
+      money_amount: task.money ? task.money.amount : 0,
+      money_category: task.money ? task.money.category : null,
+      completed_at: task.completedAt || null,
+      created_at: task.createdAt,
+      updated_at: task.updatedAt || task.createdAt,
+      money_state: task.moneyState || "none",
+      ledger_id: task.ledgerId || null,
+      posted_at: task.postedAt || null,
+      sync_error: task.syncError || null,
+    };
+  }
+
+  function rowToTask(row) {
+    if (!row || !row.id) return null;
+    return normalizeTask({
+      id: row.id,
+      title: row.title,
+      notes: row.notes,
+      dueDate: row.due_date,
+      dueTime: row.due_time,
+      money:
+        row.money_type && row.money_type !== "none" && Number(row.money_amount) > 0
+          ? {
+              type: row.money_type,
+              amount: Number(row.money_amount),
+              category: row.money_category || "อื่นๆ",
+            }
+          : null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at || row.created_at,
+      completedAt: row.completed_at,
+      moneyState: row.money_state || "none",
+      ledgerId: row.ledger_id,
+      postedAt: row.posted_at,
+      syncError: row.sync_error,
+    });
+  }
+
+  async function fetchRemoteTasks() {
+    if (!app.supabase) return null;
+    const { data, error } = await app.supabase
+      .from("winlist_tasks")
+      .select("*")
+      .order("created_at", { ascending: true });
+    if (error) throw error;
+    return (data || []).map(rowToTask).filter(Boolean);
+  }
+
+  function readSyncedIds() {
+    try {
+      const raw = localStorage.getItem("winlist.syncedIds");
+      const list = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(list) ? list.map(String) : []);
+    } catch (error) {
+      return new Set();
+    }
+  }
+
+  function writeSyncedIds(ids) {
+    try {
+      localStorage.setItem("winlist.syncedIds", JSON.stringify(Array.from(ids)));
+    } catch (error) {}
+  }
+
+  function scheduleRemoteSync(delay) {
+    if (!app.supabase) return;
+    if (app.remoteTimer) window.clearTimeout(app.remoteTimer);
+    app.remoteTimer = window.setTimeout(function () {
+      app.remoteTimer = null;
+      void syncRemote();
+    }, typeof delay === "number" ? delay : 700);
+  }
+
+  async function syncRemote() {
+    if (!app.supabase) return;
+    if (app.remoteSyncing) {
+      app.remoteAgain = true;
+      return;
+    }
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      app.remoteStatus = "offline";
+      renderLedgerUi();
+      return;
+    }
+    app.remoteSyncing = true;
+    app.remoteStatus = "syncing";
+    renderLedgerUi();
+    try {
+      const rows = state.tasks.map(taskToRow);
+      if (rows.length) {
+        const { error } = await app.supabase
+          .from("winlist_tasks")
+          .upsert(rows, { onConflict: "id" });
+        if (error) throw error;
+      }
+
+      const { data: remoteIds, error: idError } = await app.supabase
+        .from("winlist_tasks")
+        .select("id");
+      if (idError) throw idError;
+
+      const localIds = new Set(state.tasks.map(function (task) {
+        return task.id;
+      }));
+      const toDelete = (remoteIds || [])
+        .map(function (row) {
+          return row.id;
+        })
+        .filter(function (id) {
+          return app.lastSyncedIds.has(id) && !localIds.has(id);
+        });
+      if (toDelete.length) {
+        const { error: deleteError } = await app.supabase
+          .from("winlist_tasks")
+          .delete()
+          .in("id", toDelete);
+        if (deleteError) throw deleteError;
+      }
+
+      app.lastSyncedIds = localIds;
+      writeSyncedIds(localIds);
+      app.remoteStatus = "online";
+      app.remoteError = "";
+    } catch (error) {
+      app.remoteStatus = "error";
+      app.remoteError =
+        (error && (error.message || error.error_description)) ||
+        "ซิงก์คลาวด์ไม่สำเร็จ";
+    } finally {
+      app.remoteSyncing = false;
+      renderLedgerUi();
+      if (app.remoteAgain) {
+        app.remoteAgain = false;
+        scheduleRemoteSync(1500);
+      }
+    }
+  }
+
+  function mergeTasks(localTasks, remoteTasks) {
+    const map = new Map();
+    remoteTasks.forEach(function (task) {
+      map.set(task.id, task);
+    });
+    localTasks.forEach(function (task) {
+      const remote = map.get(task.id);
+      if (!remote) {
+        map.set(task.id, task);
+        return;
+      }
+      const localTime = Date.parse(task.updatedAt || task.createdAt) || 0;
+      const remoteTime = Date.parse(remote.updatedAt || remote.createdAt) || 0;
+      map.set(task.id, remoteTime >= localTime ? remote : task);
+    });
+    return Array.from(map.values());
+  }
+
+  async function loadState() {
+    const local = loadLocalState();
+    if (!app.supabase) return local;
+    try {
+      const remoteTasks = await fetchRemoteTasks();
+      if (!remoteTasks) return local;
+      if (!remoteTasks.length && local.tasks.length) {
+        // First cloud run: seed the cloud from the device.
+        state = local;
+        scheduleRemoteSync(0);
+        app.remoteStatus = "online";
+        return local;
+      }
+      const remoteSet = new Set(remoteTasks.map(function (task) {
+        return task.id;
+      }));
+      const previouslySynced = readSyncedIds();
+      local.tasks = local.tasks.filter(function (task) {
+        return !previouslySynced.has(task.id) || remoteSet.has(task.id);
+      });
+      local.tasks = mergeTasks(local.tasks, remoteTasks);
+      app.lastSyncedIds = remoteSet;
+      writeSyncedIds(remoteSet);
+      app.remoteStatus = "online";
+      app.remoteError = "";
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(local));
+      } catch (error) {}
+      return local;
+    } catch (error) {
+      app.remoteStatus = "error";
+      app.remoteError =
+        (error && (error.message || error.error_description)) ||
+        "โหลดข้อมูลคลาวด์ไม่สำเร็จ";
+      return local;
+    }
+  }
+
+  function scheduleRemoteRefresh(delay) {
+    if (!app.supabase) return;
+    if (app.remoteApplyTimer) window.clearTimeout(app.remoteApplyTimer);
+    app.remoteApplyTimer = window.setTimeout(function () {
+      app.remoteApplyTimer = null;
+      void refreshFromRemote();
+    }, typeof delay === "number" ? delay : 1200);
+  }
+
+  async function refreshFromRemote() {
+    if (!app.supabase || app.remoteSyncing) return;
+    try {
+      const remoteTasks = await fetchRemoteTasks();
+      if (!remoteTasks) return;
+      const remoteMap = new Map();
+      remoteTasks.forEach(function (task) {
+        remoteMap.set(task.id, task);
+      });
+      let changed = false;
+      const localMap = new Map();
+      state.tasks.forEach(function (task) {
+        localMap.set(task.id, task);
+      });
+
+      remoteTasks.forEach(function (task) {
+        const local = localMap.get(task.id);
+        if (!local) {
+          localMap.set(task.id, task);
+          changed = true;
+          return;
+        }
+        const localTime = Date.parse(local.updatedAt || local.createdAt) || 0;
+        const remoteTime = Date.parse(task.updatedAt || task.createdAt) || 0;
+        if (remoteTime > localTime) {
+          localMap.set(task.id, task);
+          changed = true;
+        }
+      });
+
+      app.lastSyncedIds.forEach(function (id) {
+        if (!remoteMap.has(id) && localMap.has(id)) {
+          localMap.delete(id);
+          changed = true;
+        }
+      });
+
+      if (changed) {
+        state.tasks = Array.from(localMap.values());
+        writeLocalState();
+        renderAll();
+        syncSettingsControls();
+      }
+      app.remoteStatus = "online";
+      app.remoteError = "";
+    } catch (error) {
+      app.remoteStatus = "error";
+      app.remoteError =
+        (error && (error.message || error.error_description)) ||
+        "รับข้อมูลคลาวด์ไม่สำเร็จ";
+    }
+    renderLedgerUi();
+  }
+
+  function subscribeRemote() {
+    if (!app.supabase || !app.supabase.channel || app.channel) return;
+    try {
+      app.channel = app.supabase
+        .channel("winlist-tasks")
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "winlist_tasks",
+          },
+          function () {
+            if (app.remoteSyncing) return;
+            scheduleRemoteRefresh();
+          }
+        )
+        .subscribe(function (status) {
+          if (status === "SUBSCRIBED") {
+            app.remoteStatus = app.remoteStatus === "error" ? "error" : "online";
+          }
+        });
+    } catch (error) {
+      app.channel = null;
     }
   }
 
@@ -1786,6 +2165,62 @@
     return op;
   }
 
+  async function applySupabaseOps(ops) {
+    const results = [];
+    let nextId = Date.now();
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
+      if (op.op === "remove") {
+        const { error } = await app.supabase
+          .from("winlist_ledger")
+          .delete()
+          .eq("task_id", op.taskId);
+        if (error) {
+          results.push({ taskId: op.taskId, ok: false, error: error.message });
+        } else {
+          results.push({
+            taskId: op.taskId,
+            ok: true,
+            ledgerId: op.ledgerId || null,
+          });
+        }
+        continue;
+      }
+
+      const entry = op.entry;
+      if (!entry || !entry.type || !Number.isFinite(Number(entry.amount))) {
+        results.push({
+          taskId: op.taskId,
+          ok: false,
+          error: "ข้อมูลรายการเงินไม่ครบ",
+        });
+        continue;
+      }
+
+      let id = Number(op.ledgerId) || Number(entry.id) || nextId;
+      nextId = Math.max(nextId + 1, id + 1);
+      const row = {
+        id: id,
+        task_id: op.taskId,
+        type: entry.type,
+        description: entry.description,
+        category: entry.category || "อื่นๆ",
+        amount: Math.round(Number(entry.amount) * 100) / 100,
+        date: entry.date,
+        month: entry.month,
+      };
+      const { error } = await app.supabase
+        .from("winlist_ledger")
+        .upsert(row, { onConflict: "id" });
+      if (error) {
+        results.push({ taskId: op.taskId, ok: false, error: error.message });
+      } else {
+        results.push({ taskId: op.taskId, ok: true, ledgerId: id });
+      }
+    }
+    return { ok: true, results: results };
+  }
+
   function applyDirectOps(ops) {
     const current = readLedgerTransactions();
     if (current === null) {
@@ -2034,6 +2469,38 @@
       return;
     }
 
+    if (app.supabase) {
+      app.flushing = true;
+      renderLedgerUi();
+      let outcome = null;
+      try {
+        outcome = await applySupabaseOps(ops);
+      } catch (error) {
+        outcome = { ok: false, error: error.message || "เขียนคลาวด์ไม่สำเร็จ" };
+      }
+      app.flushing = false;
+      if (outcome && outcome.ok) {
+        applyLedgerResults(outcome.results || []);
+        state.settings.ledgerVerified = true;
+        saveState();
+        renderAll();
+        if (opts.manual) {
+          showToast("ลงบัญชีคลาวด์แล้ว", { type: "success" });
+        }
+      } else {
+        markOpsError(ops, (outcome && outcome.error) || "เขียนคลาวด์ไม่สำเร็จ");
+        saveState();
+        renderAll();
+        if (opts.manual) {
+          showToast((outcome && outcome.error) || "เขียนคลาวด์ไม่สำเร็จ", {
+            type: "error",
+            duration: 6000,
+          });
+        }
+      }
+      return;
+    }
+
     const url = resolveLedgerUrl(state.settings.ledgerUrl);
     if (!url) {
       markOpsQueued(ops, "ยังไม่ได้ตั้งลิงก์ Money Ledger");
@@ -2136,6 +2603,35 @@
   }
 
   async function testLedgerConnection() {
+    if (app.supabase) {
+      showToast("กำลังทดสอบฐานข้อมูลคลาวด์…", { duration: 1400 });
+      try {
+        const { error } = await app.supabase
+          .from("winlist_tasks")
+          .select("id", { count: "exact", head: true });
+        if (error) throw error;
+        app.remoteStatus = "online";
+        app.remoteError = "";
+        state.settings.ledgerVerified = true;
+        saveState();
+        renderAll();
+        showToast("เชื่อมฐานข้อมูลคลาวด์ได้แล้ว", { type: "success" });
+      } catch (error) {
+        app.remoteStatus = "error";
+        app.remoteError =
+          (error && (error.message || error.error_description)) ||
+          "เชื่อมคลาวด์ไม่สำเร็จ";
+        state.settings.ledgerVerified = false;
+        saveState();
+        renderAll();
+        showToast("เชื่อมคลาวด์ไม่สำเร็จ: " + app.remoteError, {
+          type: "error",
+          duration: 7000,
+        });
+      }
+      return;
+    }
+
     const url = resolveLedgerUrl(state.settings.ledgerUrl);
     if (!url) {
       showToast("ใส่ลิงก์ Money Ledger ก่อนทดสอบ", { type: "error" });
@@ -2204,7 +2700,16 @@
       verified: verified,
       pending: pending,
       errors: errors,
-      mode: direct ? "direct" : verified ? "bridge" : "queue",
+      cloud: Boolean(app.supabase),
+      remoteStatus: app.remoteStatus,
+      remoteError: app.remoteError,
+      mode: app.supabase
+        ? "cloud"
+        : direct
+          ? "direct"
+          : verified
+            ? "bridge"
+            : "queue",
     };
   }
 
@@ -2214,6 +2719,9 @@
     if (app.flushing) dotState = "queued";
     else if (snapshot.errors) dotState = "error";
     else if (snapshot.pending) dotState = "queued";
+    else if (snapshot.cloud && snapshot.remoteStatus === "online") dotState = "posted";
+    else if (snapshot.cloud && snapshot.remoteStatus === "error") dotState = "error";
+    else if (snapshot.cloud) dotState = "queued";
     else if (snapshot.direct || snapshot.verified) dotState = "posted";
 
     if (els.syncBtn) {
@@ -2222,17 +2730,38 @@
         "aria-label",
         "Money Ledger: " +
           (dotState === "posted"
-            ? "เชื่อมแล้ว"
+            ? snapshot.cloud
+              ? "เชื่อมคลาวด์แล้ว"
+              : "เชื่อมแล้ว"
             : dotState === "error"
               ? "มีรายการที่ยังไม่สำเร็จ"
               : dotState === "queued"
-                ? "มีรายการรอส่ง"
+                ? snapshot.cloud
+                  ? "กำลังซิงก์คลาวด์"
+                  : "มีรายการรอส่ง"
                 : "ยังไม่ได้เชื่อม")
       );
     }
 
     if (els.ledgerSummary) {
-      if (!snapshot.url) {
+      if (snapshot.cloud) {
+        if (snapshot.remoteStatus === "error") {
+          els.ledgerSummary.textContent = "คลาวด์ขัดข้อง — ใช้สำรองในเครื่อง";
+          els.ledgerDetail.textContent =
+            snapshot.remoteError || "ระบบจะลองซิงก์อีกครั้งเมื่อกลับมาออนไลน์";
+        } else if (
+          snapshot.remoteStatus === "syncing" ||
+          snapshot.remoteStatus === "loading"
+        ) {
+          els.ledgerSummary.textContent = "กำลังซิงก์กับคลาวด์…";
+          els.ledgerDetail.textContent = "งานและรายการเงินจะตรงกันทุกอุปกรณ์";
+        } else {
+          els.ledgerSummary.textContent = "เชื่อมฐานข้อมูลคลาวด์";
+          els.ledgerDetail.textContent = snapshot.pending
+            ? snapshot.pending + " รายการรอลงบัญชีคลาวด์"
+            : "งาน เงิน และสถานะซิงก์ตรงกันทุกอุปกรณ์";
+        }
+      } else if (!snapshot.url) {
         els.ledgerSummary.textContent = "ยังไม่ได้เชื่อมในเครื่องนี้";
         els.ledgerDetail.textContent =
           "รายการที่ทำเสร็จจะถูกเก็บไว้ในคิว และส่งต่อเมื่อเชื่อมได้";
@@ -2255,18 +2784,35 @@
           "เปิดหน้าตั้งค่าเพื่อใส่ลิงก์ ทดสอบ หรือส่งคิวที่ค้าง";
       }
       els.ledgerAction.textContent =
-        snapshot.direct || snapshot.verified ? "จัดการ" : "เชื่อมต่อ";
+        snapshot.cloud || snapshot.direct || snapshot.verified
+          ? "จัดการ"
+          : "เชื่อมต่อ";
     }
 
     if (els.ledgerStatusText) {
       els.ledgerStatus.className =
         "status-line" +
-        (snapshot.direct || snapshot.verified
-          ? " is-posted"
-          : snapshot.url
-            ? ""
-            : " is-off");
-      if (!snapshot.url) {
+        (snapshot.cloud
+          ? snapshot.remoteStatus === "error"
+            ? " is-off"
+            : " is-posted"
+          : snapshot.direct || snapshot.verified
+            ? " is-posted"
+            : snapshot.url
+              ? ""
+              : " is-off");
+      if (snapshot.cloud) {
+        if (snapshot.remoteStatus === "error") {
+          els.ledgerStatusText.textContent = "คลาวด์เชื่อมต่อไม่ได้";
+          els.ledgerStatusDetail.textContent =
+            (snapshot.remoteError || "ซิงก์ไม่สำเร็จ") +
+            " · ข้อมูลยังถูกเก็บในเครื่องและจะส่งอีกครั้ง";
+        } else {
+          els.ledgerStatusText.textContent = "เชื่อมฐานข้อมูล Supabase แล้ว";
+          els.ledgerStatusDetail.textContent =
+            "งานและรายการเงินซิงก์กับฐานข้อมูลกลาง ใช้ได้หลายอุปกรณ์";
+        }
+      } else if (!snapshot.url) {
         els.ledgerStatusText.textContent = "ยังไม่ได้ตั้งลิงก์ Money Ledger";
         els.ledgerStatusDetail.textContent =
           "ใส่ลิงก์ไปยังหน้า Money Ledger ด้านล่าง แล้วกดทดสอบการเชื่อมต่อ";
@@ -2326,8 +2872,17 @@
     els.footVersion.textContent = "v" + APP_VERSION.split(".").slice(0, 2).join(".");
 
     const count = state.tasks.length;
-    els.storageNote.textContent =
-      count + " รายการ · เก็บใน localStorage ของเบราว์เซอร์นี้";
+    if (app.supabase) {
+      els.storageNote.textContent =
+        count +
+        " รายการ · " +
+        (app.remoteStatus === "error"
+          ? "คลาวด์ขัดข้อง เก็บสำรองในเครื่อง"
+          : "ซิงก์กับฐานข้อมูลคลาวด์");
+    } else {
+      els.storageNote.textContent =
+        count + " รายการ · เก็บใน localStorage ของเบราว์เซอร์นี้";
+    }
 
     const standalone =
       (window.matchMedia &&
@@ -2689,9 +3244,13 @@
       if (document.hidden) return;
       tickClock(true);
       const snapshot = ledgerSnapshot();
+      if (app.supabase) {
+        void refreshFromRemote();
+        scheduleRemoteSync(400);
+      }
       if (
         state.ledgerQueue.length &&
-        (snapshot.direct || state.settings.ledgerVerified)
+        (snapshot.direct || snapshot.cloud || state.settings.ledgerVerified)
       ) {
         void flushQueue({ reason: "auto" });
       }
@@ -2699,7 +3258,13 @@
 
     window.addEventListener("online", function () {
       const snapshot = ledgerSnapshot();
-      if (snapshot.direct || state.settings.ledgerVerified) {
+      if (app.supabase) {
+        app.remoteStatus = "loading";
+        renderLedgerUi();
+        scheduleRemoteSync(200);
+        void refreshFromRemote();
+      }
+      if (snapshot.direct || snapshot.cloud || state.settings.ledgerVerified) {
         void flushQueue({ reason: "auto" });
       }
     });
@@ -2726,9 +3291,55 @@
 
   /* ---------- Init ---------- */
 
+  async function boot() {
+    state = loadLocalState();
+    syncSettingsControls();
+    renderDateBand(new Date());
+    renderAll();
+    tickClock(true);
+
+    if (app.loadError) {
+      showToast(app.loadError, { type: "error", duration: 7000 });
+      app.loadError = "";
+    }
+
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("new") === "1") {
+        window.setTimeout(function () {
+          openTaskForm(null);
+        }, 320);
+      }
+    } catch (error) {}
+
+    const cloudReady = await initSupabase();
+    if (cloudReady) {
+      state = await loadState();
+      subscribeRemote();
+      syncSettingsControls();
+      renderAll();
+    }
+
+    if (app.supabase && app.remoteStatus !== "error") {
+      const known = app.lastSyncedIds || new Set();
+      const unsynced = state.tasks.some(function (task) {
+        return !known.has(task.id);
+      });
+      if (unsynced) scheduleRemoteSync(600);
+    }
+
+    const snapshot = ledgerSnapshot();
+    if (
+      state.ledgerQueue.length &&
+      (snapshot.cloud || snapshot.direct || snapshot.verified)
+    ) {
+      void flushQueue({ reason: "auto" });
+    }
+  }
+
   function init() {
-    state = loadState();
     cacheElements();
+    state = defaultState();
     app.lastDayKey = todayKey();
 
     applyTheme();
@@ -2741,23 +3352,7 @@
     initInstall();
     registerServiceWorker();
 
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("new") === "1") {
-        window.setTimeout(function () {
-          openTaskForm(null);
-        }, 320);
-      }
-    } catch (error) {}
-
-    if (app.loadError) {
-      showToast(app.loadError, { type: "error", duration: 7000 });
-    }
-
-    const snapshot = ledgerSnapshot();
-    if (state.ledgerQueue.length && (snapshot.direct || snapshot.verified)) {
-      void flushQueue({ reason: "auto" });
-    }
+    void boot();
   }
 
   init();

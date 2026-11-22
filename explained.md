@@ -6,6 +6,30 @@
 
 ---
 
+## 0. Implementation status (updated 2026-11-22)
+
+**Done in the app:**
+- Supabase client boots only when `#supabase-url` and `#supabase-anon-key` are filled; otherwise the app stays on localStorage.
+- Tasks load from and save to `winlist_tasks`, with localStorage kept as an offline cache.
+- Completing a task with money writes to `winlist_ledger`; un-completing and deleting reverse that row.
+- Editing an already-posted amount updates the same ledger row.
+- Queue operations flush to Supabase when cloud mode is active.
+- Realtime subscription refreshes changes from other devices.
+- First run with an empty cloud seeds it from the device's existing tasks.
+- `supabase/schema.sql` creates both tables, indexes, RLS policies and the realtime publication.
+- `index.html` ships empty Supabase meta tags; `WinList.html` is rebuilt with the same code.
+- Version bumped to 1.1.0; service-worker cache bumped to `winlist-shell-v1.1.0`.
+
+**Still required (owner action):**
+1. Create the Supabase project.
+2. Run `supabase/schema.sql` in SQL Editor.
+3. Copy Project URL + anon key into the two meta tags in `index.html` (and rebuild `WinList.html`).
+4. Deploy and verify on two devices.
+
+No code work is blocked on anything else.
+
+---
+
 ## 1. Motivation
 
 | Issue | localStorage | Supabase |
@@ -73,63 +97,47 @@ After project is ready:
    - **service_role key:** `eyJhbGciOiJIUzI1NiIsInR5cCI6ikpXVCJ9...` (for server ops, keep secret!)
 
 ### 3.3 Create Database Tables
-In the Supabase SQL Editor, run:
+Run the shipped file **`supabase/schema.sql`** in the SQL Editor. It is the
+single source of truth for the schema (this section only summarises it):
 
-```sql
--- Enable UUID extension if not already enabled
-create extension if not exists "uuid-osc";
+| Table | Purpose | Key columns |
+|---|---|---|
+| `public.winlist_tasks` | One row per task | `id text` (app-generated, e.g. `t_...`), title, due date/time, `money_type`, `money_amount`, `money_category`, `completed_at`, `money_state`, `ledger_id`, timestamps |
+| `public.winlist_ledger` | Money rows posted by completed tasks | `id bigint` (app-generated `Date.now()`), `task_id`, `type`, `description`, `category`, `amount`, `date`, `month` |
 
--- Table: public.winlist_tasks
-create table if not exists public.winlist_tasks (
-  id uuid default gen_random_uuid() primary key,
-  title text not null,
-  notes text,
-  due_date text,
-  due_time text,
-  money_type text check (money_type in ('expense', 'income', 'none')),
-  money_amount numeric(12,2) default 0,
-  money_category text default 'อื่นๆ',
-  completed_at timestamp with time zone,
-  created_at timestamp with time zone default timezone('utc'::text, now()),
-  updated_at timestamp with time zone default timezone('utc'::text, now()),
-  money_state text default 'none' check (money_state in ('none', 'queued', 'sent', 'posted', 'error', 'missing')),
-  ledger_id integer,
-  posted_at timestamp with time zone,
-  sync_error text
-);
+Field names in `winlist_ledger` intentionally mirror Money Ledger's
+`transactions` objects, so the same rows can be read by either app.
 
--- Table: public.winlist_ledger_queue
-create table if not exists public.winlist_ledger_queue (
-  id uuid default gen_random_uuid() primary key,
-  task_id uuid references public.winlist_tasks(id) on delete cascade,
-  op text check (op in ('upsert', 'remove')),
-  ledger_id integer,
-  entry jsonb,
-  created_at timestamp with time zone default timezone('utc'::text, now()),
-  sent_at timestamp with time zone
-);
+The script also creates:
+- indexes on `created_at`, `completed_at`, `task_id`, `month`
+- RLS enabled with permissive `anon`/`authenticated` policies (personal,
+  single-owner app — documented in the file)
+- grants for `anon`
+- a `supabase_realtime` publication entry for `winlist_tasks`
+- a convenience view `winlist_ledger_as_transactions`
 
--- Row Level Security: Allow authenticated actions from the app's origin
--- (For now, keep RLS off for simplicity during migration)
-alter table public.winlist_tasks enable row level security;
-alter table public.winlist_ledger_queue enable row level security;
+> The earlier draft used a separate `winlist_ledger_queue` table and `uuid`
+> ids. The final implementation writes ledger rows directly and uses the
+> app's own ids, so no queue table is needed.
 
--- Create policy for public access (development only, tighten later)
-create policy "Allow public insert/select" on public.winlist_tasks
-  for all using (true) with check (true);
+### 3.4 Real-time
+`supabase/schema.sql` adds `winlist_tasks` to the `supabase_realtime`
+publication. The app subscribes to `postgres_changes` on that table and
+refreshes from the cloud when another device writes.
 
-create policy "Allow public queue insert/select" on public.winlist_ledger_queue
-  for all using (true) with check (true);
-```
-
-### 3.4 (Optional) Set up Real-time
-1. Go to **Project → Realtime**
-2. Ensure tables `winlist_tasks` and `winlist_ledger_queue` are ticked on
-3. The app can now listen for `INSERT`/`UPDATE`/`DELETE` events
 
 ---
 
 ## 4. Code Modifications in `assets/app.js`
+
+> **Status: implemented, but not exactly as drafted below.** The final code
+> in `assets/app.js` keeps `saveState()` synchronous (it writes localStorage
+> and schedules a debounced cloud sync) so the UI never waits on the network.
+> Cloud helpers are grouped under the “Supabase cloud sync” comment and
+> include: `readSupabaseConfig`, `initSupabase`, `taskToRow`/`rowToTask`,
+> `fetchRemoteTasks`, `syncRemote`, `refreshFromRemote`, `subscribeRemote`,
+> `applySupabaseOps`, plus `winlist.syncedIds` bookkeeping so remote deletes
+> propagate. The snippets below are the original design notes.
 
 ### 4.1 Add Supabase Client Initialization
 At the top of the IIFE (after line 1, before `const STORAGE_KEY`), add:
@@ -504,23 +512,34 @@ For users upgrading from the old version:
 ## 6. Deployment checklist
 
 ### 6.1 Before Deploy
-- [ ] Create Supabase project and tables
-- [ ] Add meta tags to `index.html`/`WinList.html`:
+- [ ] Create the Supabase project
+- [ ] Run `supabase/schema.sql` in the SQL Editor
+- [ ] Fill the two meta tags in `index.html`:
   ```html
-  <meta id="supabase-url" content="https://your-project.supabase.com">
-  <meta id="supabase-anon-key" content="your-anon-key">
+  <meta id="supabase-url" content="https://<uuid>.supabase.co" />
+  <meta id="supabase-anon-key" content="eyJ..." />
   ```
+- [ ] Run `node build.js` to regenerate `WinList.html` (and the zip)
 - [ ] Test locally: `python -m http.server 8123`
-- [ ] Verify tasks add/edit/delete works with Supabase
-- [ ] Verify Money Ledger integration works
-- [ ] Test backup export/import
+- [ ] Verify add / edit / complete / un-complete / delete with Supabase
+- [ ] Test backup export / import
 
-### 6.2 After Deploy (Vercel/Netlify)
-- [ ] Check browser console for Supabase errors
-- [ ] Test in incognito/private mode
-- [ ] Verify real-time subscriptions work (if enabled)
-- [ ] Confirm backup functionality
-- [ ] Check mobile responsiveness (320px+)
+### 6.2 Deploy on Vercel
+1. Push this repo to GitHub (`Raiwin111/WINLIST`).
+2. In Vercel: **Add New → Project → Import** the repo.
+3. Framework preset **Other**, no build command, output directory `.`.
+   (It is a static site: `index.html`, `assets/`, `sw.js`, `manifest.webmanifest`.)
+4. Deploy, then open the URL on two devices and check that tasks and ledger
+   rows sync.
+5. Remove the old Money Ledger Netlify site from the Netlify dashboard once
+   the new Vercel URL is confirmed.
+
+Checklist after deploy:
+- [ ] No console errors
+- [ ] Works in incognito / private mode
+- [ ] Realtime updates across two devices
+- [ ] Export / import still works
+- [ ] Mobile layout at 320px+
 
 ### 6.3 Rollback Plan
 If something goes wrong:

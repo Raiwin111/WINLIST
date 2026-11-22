@@ -1,5 +1,5 @@
 /* WinList service worker — offline shell for the installed PWA. */
-const CACHE = "winlist-shell-v1.0.0";
+const CACHE = "winlist-shell-v1.1.0";
 
 const SHELL = [
   "./",

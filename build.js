@@ -35,7 +35,8 @@ html = html
 
 const banner =
   "<!-- WinList standalone build: all CSS, JS and fonts are embedded. " +
-  "Data stays in this browser's localStorage. Built " +
+  "Data is stored in this browser, and syncs to Supabase when the " +
+  "#supabase-url and #supabase-anon-key meta tags below are filled in. Built " +
   new Date().toISOString().slice(0, 10) +
   ". -->\n";
 

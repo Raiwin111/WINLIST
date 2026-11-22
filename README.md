@@ -22,27 +22,33 @@ Supabase เป็น open-source Firebase alternative ที่ใช้ Postgr
 | **ราคา** | ฟรี (0 บาท) | ฟรีจนถึงระดับหนึ่ง แล้วมีค่าใช้จ่าย |
 | **ออฟไลน์** | ทำงานได้ทันที | ใช้ localStorage สำรองได้ |
 
-### ขั้นตอนตั้งค่า Supabase
-1. ลงทะเบียนที่ [supabase.io](https://supabase.io) (ฟรี)
-2. สร้างโปรเจกต์ใหม่ (เช่น `winlist`)
-3. จดบันทึกค่าดังนี้เก็บไว้:
-   - **Project URL:** `https://<uuid>.supabase.com`
-   - **anon public key:** ค่า `eyJ...` (ใช้กับฝั่ง client)
-   - **service_role key:** ค่า `eyJ...` (ใช้กับ server-side เก็บเป็นความลับ)
-
-### เพิ่มลงใน WinList
-เปิดไฟล์ `index.html` หรือ `WinList.html` หา `<head>` แล้วเพิ่ม code ตรงนี้:
+### ขั้นตอนตั้งค่า Supabase (ทำครั้งเดียว)
+1. ลงทะเบียนที่ [supabase.io](https://supabase.io) (ฟรี) แล้วสร้างโปรเจกต์ใหม่ เช่น `winlist`
+2. ไปที่ **SQL Editor** แล้วรันไฟล์ `supabase/schema.sql` ทั้งไฟล์
+   - สร้างตาราง `winlist_tasks` และ `winlist_ledger`
+   - ตั้งค่า RLS, สิทธิ์ anon, index และ realtime ให้พร้อม
+3. ไปที่ **Settings → API** แล้วคัดลอก:
+   - **Project URL** (`https://<uuid>.supabase.co`)
+   - **anon public key** (ขึ้นต้นด้วย `eyJ...`)
+4. เปิด `index.html` หา meta สองบรรทัดนี้ แล้วใส่ค่า:
 
 ```html
-<!-- Supabase Client -->
-<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
-<!-- ค่าคราแกร่ง Supabase (ดึงจาก Project Settings → API) -->
-<meta id="supabase-url" content="https://your-project.supabase.com">
-<meta id="supabase-anon-key" content="your-anon-public-key-here">
+<meta id="supabase-url" content="https://<uuid>.supabase.co" />
+<meta id="supabase-anon-key" content="eyJ..." />
 ```
 
-ใน `app.js` ตอนเริ่มต้น (ในฟังก์ชัน `init()`) จะมีการอ่าน meta tag เหล่านี้และสร้าง `app.supabase` ขึ้นมาใช้งานอัตโนมัติ
+5. รัน `node build.js` เพื่อสร้าง `WinList.html` ใหม่ แล้ว deploy
+
+> ไม่ต้องเพิ่ม `<script>` เอง — แอปจะโหลด Supabase SDK ให้เมื่อมีค่าครบทั้งสองค่า
+> ถ้าเว้นว่าง แอปจะทำงานด้วย localStorage ตามเดิมโดยไม่พัง
+>
+> **ความปลอดภัย:** policy ในไฟล์ schema เปิดให้ anon key อ่าน/เขียนได้ ซึ่งเหมาะกับแอปส่วนตัวเครื่องเดียว หากต้องการหลายผู้ใช้ ให้เพิ่ม Supabase Auth แล้วเปลี่ยน policy เป็น `auth.uid()`
+
+### สิ่งที่ซิงก์กับคลาวด์
+- งานทั้งหมด (`winlist_tasks`)
+- รายการเงินที่ลงบัญชี (`winlist_ledger`) — ฟิลด์ตรงกับ Money Ledger (`type`, `description`, `category`, `amount`, `date`, `month`)
+- สถานะคิว/โพสต์/ยกเลิก และ timestamp ทุกจุด
+- เปิดแอปบนอีกเครื่อง ข้อมูลจะโหลดจากคลาวด์และอัปเดตแบบ realtime
 
 ### ฟีเจอร์ที่ใช้ได้หลังจากต่อ Supabase
 - **เก็บรายการงาน** บนคลาวด์ ดูได้ทุกอุปกรณ์
@@ -147,6 +153,7 @@ WinList รองรับ 3 รูปแบบ:
 | `assets/app.css` / `assets/app.js` | ไฟล์ต้นทาง (CSS ตกแต่ง + JS เต็มรูป) |
 | `assets/fonts/` | ฟอนต์ Bai Jamjuree + Anuphan (6 ไฟล์ WOFF2) |
 | `icons/` | ไอคอน PWA ขนาด 192, 512, maskable, apple-touch |
+| `supabase/schema.sql` | สคริปต์สร้างตาราง/สิทธิ์/realtime สำหรับ Supabase (รันครั้งเดียว) |
 | `bridge/money-ledger-receiver.js` | สคริปต์รับ postMessage ข้ามโดเมน (หากใช้ cross-origin) |
 | `bridge/money-ledger-with-winlist.html` | Money Ledger แก้ไขเพิ่มเติมใส่ iframe Bridge |
 | `WinList-PWA.zip` | ซี่ปี้พร้อมใช้ทุกอย่างบรรจุในไฟล์เดียว |
